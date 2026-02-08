@@ -1,0 +1,10 @@
+version: '4.41.0'
+services:
+  trino:
+    image: trinodb/trino:latest
+    container_name: trino
+    ports:
+      - "9100:8080"
+    volumes:
+      # Mounting the local catalog directory to the container's catalog directory
+      - ./catalog:/etc/trino/catalog

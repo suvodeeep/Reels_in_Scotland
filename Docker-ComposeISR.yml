@@ -1,0 +1,198 @@
+version: '4.41.0'
+
+services:
+  # Generate a cluster ID that all nodes will share via volume
+  kafka-cluster-id:
+    image: confluentinc/cp-kafka:latest
+    container_name: kafka-cluster-id
+    volumes:
+      - cluster_id:/tmp
+    # Generate UUID and write to shared volume
+    entrypoint: >
+      bash -c "
+        echo 'Generating cluster ID...';
+        kafka-storage random-uuid > /tmp/cluster.id;
+        echo 'Cluster ID generated:';
+        cat /tmp/cluster.id;
+        echo 'Cluster ID saved to /tmp/cluster.id'
+      "
+    # Container exits immediately after generating ID
+    restart: "no"
+
+  #Controller node - manages cluster metadata
+  controller:
+    image: confluentinc/cp-kafka:latest
+    container_name: controller
+    hostname: controller
+    depends_on:
+      - kafka-cluster-id
+    ports:
+      - "9093:9093"
+    volumes:
+      - cluster_id:/tmp
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: controller
+      KAFKA_LISTENERS: CONTROLLER://controller:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@controller:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT
+    # Wait for the cluster ID file, then format and start
+    command: >
+      bash -c "
+        echo 'Waiting for cluster ID file...';
+        until [ -f /tmp/cluster.id ]; do
+          echo 'Cluster ID not ready, waiting...';
+          sleep 2;
+        done;
+        CLUSTER_ID=$$(cat /tmp/cluster.id);
+        echo \"Using cluster ID: $$CLUSTER_ID\";
+        kafka-storage format --ignore-formatted -t $$CLUSTER_ID -c /etc/kafka/docker/server.properties;
+        echo 'Starting controller...';
+        /etc/confluent/docker/run
+      "
+
+  #Broker 1
+  broker1:
+    image: confluentinc/cp-kafka:latest
+    container_name: broker1
+    hostname: broker1
+    depends_on:
+      - controller
+      - kafka-cluster-id
+    ports:
+      - "9092:9092"
+    volumes:
+      - cluster_id:/tmp
+    environment:
+      KAFKA_NODE_ID: 2
+      KAFKA_PROCESS_ROLES: broker
+      
+      # Dual listeners for both internal and external access
+      # PLAINTEXT binds (0.0.0.0) for host connectivity & INTERNAL binds to broker1 hostname for container-to-container traffic
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,INTERNAL://broker1:29092
+      
+      # Advertise localhost for external clients (your Python producer)
+      # Advertise broker1:29092 for internal clients (broker2, kafka-ui)
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,INTERNAL://broker1:29092
+      
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT
+      
+      # Use internal listener for broker-to-broker replication
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@controller:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      
+      # Replication settings - set to 2
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+    # Wait for cluster ID, wait for controller, then format and start
+    command: >
+      bash -c "
+        echo 'Waiting for cluster ID file...';
+        until [ -f /tmp/cluster.id ]; do
+          echo 'Cluster ID not ready, waiting...';
+          sleep 2;
+        done;
+        CLUSTER_ID=$$(cat /tmp/cluster.id);
+        echo \"Using cluster ID: $$CLUSTER_ID\";
+        echo 'Waiting for controller to be ready...';
+        sleep 15;
+        kafka-storage format --ignore-formatted -t $$CLUSTER_ID -c /etc/kafka/docker/server.properties;
+        echo 'Starting broker1...';
+        /etc/confluent/docker/run
+      "
+
+  # Broker 2 - second data node for replication
+  broker2:
+    image: confluentinc/cp-kafka:latest
+    container_name: broker2
+    hostname: broker2
+    depends_on:
+      - controller
+      - kafka-cluster-id
+    ports:
+      - "9094:9094"
+    volumes:
+      - cluster_id:/tmp
+    environment:
+      KAFKA_NODE_ID: 3
+      KAFKA_PROCESS_ROLES: broker
+      
+      # Same dual-listener pattern with different ports
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9094,INTERNAL://broker2:29094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9094,INTERNAL://broker2:29094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@controller:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      
+      # Matching replication settings
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+    command: >
+      bash -c "
+        echo 'Waiting for cluster ID file...';
+        until [ -f /tmp/cluster.id ]; do
+          echo 'Cluster ID not ready, waiting...';
+          sleep 2;
+        done;
+        CLUSTER_ID=$$(cat /tmp/cluster.id);
+        echo \"Using cluster ID: $$CLUSTER_ID\";
+        echo 'Waiting for controller to be ready...';
+        sleep 15;
+        kafka-storage format --ignore-formatted -t $$CLUSTER_ID -c /etc/kafka/docker/server.properties;
+        echo 'Starting broker2...';
+        /etc/confluent/docker/run
+      "
+
+  # Auto topic creation with replication
+  init-kafka:
+    image: confluentinc/cp-kafka:latest
+    container_name: init-kafka
+    depends_on:
+      - broker1
+      - broker2
+    # Wait for both brokers to be healthy, then create replicated topic
+    command: bash -c 'echo "Waiting for broker1 to be ready..."; until kafka-broker-api-versions --bootstrap-server broker1:29092 >/dev/null 2>&1; do echo "Broker1 not ready, waiting..."; sleep 5; done; echo "Broker1 ready! Checking broker2..."; until kafka-broker-api-versions --bootstrap-server broker2:29094 >/dev/null 2>&1; do echo "Broker2 not ready, waiting..."; sleep 5; done; echo "Both brokers ready! Creating topic with replication..."; kafka-topics --create --bootstrap-server broker1:29092,broker2:29094 --topic weather_stream --partitions 2 --replication-factor 2 --config min.insync.replicas=2 --if-not-exists && echo "Topic created! Showing details..." && kafka-topics --describe --bootstrap-server broker1:29092 --topic weather_stream && echo "Setup complete!"'
+
+
+  # Kafka UI
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: kraft-cluster
+      # UI connects via internal listeners
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: broker1:29092,broker2:29094
+      KAFKA_CLUSTERS_0_PROPERTIES_SECURITY_PROTOCOL: PLAINTEXT
+    depends_on:
+      - broker1
+      - broker2
+
+  # kcat for command-line inspection
+  kcat:
+    image: confluentinc/cp-kcat:latest
+    container_name: kcat
+    depends_on:
+      - broker1
+      - broker2
+    # Keep container alive for manual commands
+    entrypoint: ['tail', '-f', '/dev/null']
+
+volumes:
+  cluster_id:

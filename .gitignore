@@ -1,0 +1,50 @@
+# Python virtual environments
+**/venv*/
+**/venvNew*/
+**/.venv/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE and editor files
+.metals/
+.bsp/
+.vscode/
+
+# Scala build artifacts
+.scala-build/
+**/target/
+**/project/target/
+**/project/project/target/
+
+# Machine learning training artifacts
+lightning_logs/
+*.ckpt
+wandb/
+
+# Compiled files
+*.class
+*.jar
+*.tasty
+*.log
+
+# SBT specific
+.bloop/
+metals.sbt
+project/metals.sbt
+
+# Other temporary files
+*.tmp
+*.temp
+~$*
+
+# Sensitive info ;-;
+*.properties
+!build.properties
+!log4j2.properties
+**/mongo.properties
+**/.env
+**/.env.local
+**/secrets.yml
+**/credentials.json
